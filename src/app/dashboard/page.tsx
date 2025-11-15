@@ -1,4 +1,4 @@
-// app/dashboard/page.tsx  (or pages/dashboard.tsx)
+// app/dashboard/page.tsx
 "use client";
 
 import { useEffect, useState } from "react";
@@ -8,14 +8,7 @@ import { getOrCreateDeviceId } from "@/lib/device";
 import { safeFetchJson } from "@/lib/safeFetch";
 import ForceLogoutModal from "../components/ForceLogoutModal";
 
-type Device = {
-  _id: string;
-  deviceId: string;
-  userAgent?: string;
-  createdAt?: string;
-  lastSeenAt?: string;
-  valid?: boolean;
-};
+type Device = { _id: string; deviceId: string; userAgent?: string; createdAt?: string; lastSeenAt?: string; valid?: boolean };
 
 export default function DashboardPage() {
   const { data: session, status } = useSession();
@@ -25,7 +18,6 @@ export default function DashboardPage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  // modal state & sessions list returned by validate
   const [modalOpen, setModalOpen] = useState(false);
   const [activeSessions, setActiveSessions] = useState<Device[]>([]);
 
@@ -38,7 +30,6 @@ export default function DashboardPage() {
     (async () => {
       setError(null);
       try {
-        // 1) call validate
         const deviceId = getOrCreateDeviceId();
         const v = await safeFetchJson("/api/device-sessions/validate", {
           method: "POST",
@@ -46,9 +37,21 @@ export default function DashboardPage() {
           body: JSON.stringify({ deviceId }),
         });
 
+        console.log("VALIDATE response:", v);
+
         if (!v.valid) {
-          // show modal listing active sessions (from server)
-          setActiveSessions(v.activeSessions ?? []);
+          // use server-sent sessions or fallback to list
+          let sessions = v.activeSessions ?? [];
+          if (!sessions || sessions.length === 0) {
+            try {
+              const listResp = await safeFetchJson("/api/device-sessions");
+              sessions = listResp.activeSessions ?? listResp.sessions ?? [];
+              console.log("Fallback list fetch:", sessions);
+            } catch (listErr) {
+              console.warn("Failed to fetch explicit list:", listErr);
+            }
+          }
+          setActiveSessions(sessions);
           setModalOpen(true);
           return;
         }
@@ -61,25 +64,31 @@ export default function DashboardPage() {
         setError(err?.message ?? "Failed to initialize dashboard");
       }
     })();
-  }, [status]);
+  }, [status, router]);
+
+  useEffect(() => {
+    function onRefreshed(e: any) {
+      setActiveSessions(e.detail ?? []);
+    }
+    window.addEventListener("deviceSessionsRefreshed", onRefreshed);
+    return () => window.removeEventListener("deviceSessionsRefreshed", onRefreshed);
+  }, []);
 
   async function handleForceLogout(ids: string[]) {
     setBusy(true);
     setError(null);
     try {
-      // call revoke (PUT on /api/device-sessions with ids)
       const res = await safeFetchJson("/api/device-sessions", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ids }),
       });
 
-      // server returns activeSessions — update it
       setActiveSessions(res.activeSessions ?? []);
       setMessage("Selected devices logged out. Completing login…");
       setModalOpen(false);
 
-      // re-run validate to create this session (or confirm)
+      // re-run validate
       const deviceId = getOrCreateDeviceId();
       const v = await safeFetchJson("/api/device-sessions/validate", {
         method: "POST",
@@ -92,7 +101,6 @@ export default function DashboardPage() {
         setPhone(profile?.phone ?? "");
         setMessage("Logged in successfully");
       } else {
-        // if still not valid, reopen modal or show error
         setActiveSessions(v.activeSessions ?? []);
         setModalOpen(true);
         setError("Could not create session after revoking; please try again or cancel login.");
@@ -132,7 +140,6 @@ export default function DashboardPage() {
       </div>
     );
   }
-
   if (!session) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#FFF5EB]">
@@ -143,18 +150,7 @@ export default function DashboardPage() {
 
   return (
     <div className="min-h-screen bg-[#FFF5EB] pb-12">
-      <ForceLogoutModal
-        open={modalOpen}
-        sessions={activeSessions}
-        onClose={() => {
-          // Cancel login: sign out / send user back to home
-          setModalOpen(false);
-          signOut({ callbackUrl: "/" });
-        }}
-        onForceLogout={async (ids) => {
-          await handleForceLogout(ids);
-        }}
-      />
+      <ForceLogoutModal open={modalOpen} sessions={activeSessions} onClose={() => { setModalOpen(false); signOut({ callbackUrl: "/" }); }} onForceLogout={handleForceLogout} />
 
       <header className="border-b bg-white/60 sticky top-0 z-30">
         <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
@@ -168,9 +164,7 @@ export default function DashboardPage() {
 
           <div className="flex items-center gap-4">
             <div className="text-sm text-gray-700 hidden sm:block">{session.user?.email}</div>
-            <button onClick={() => signOut({ callbackUrl: "/" })} className="px-4 py-2 rounded-full border bg-white hover:bg-gray-50 text-sm">
-              Sign out
-            </button>
+            <button onClick={() => signOut({ callbackUrl: "/" })} className="px-4 py-2 rounded-full border bg-white hover:bg-gray-50 text-sm">Sign out</button>
           </div>
         </div>
       </header>
@@ -178,9 +172,7 @@ export default function DashboardPage() {
       <main className="max-w-4xl mx-auto px-4 mt-8">
         <div className="bg-white rounded-3xl p-6 shadow-sm">
           <div className="flex items-center gap-4">
-            <div className="w-14 h-14 rounded-lg bg-[#FFD93D] flex items-center justify-center text-2xl">
-              {session.user?.name?.split(" ").map((n: string) => n?.[0]).slice(0, 2).join("") || "U"}
-            </div>
+            <div className="w-14 h-14 rounded-lg bg-[#FFD93D] flex items-center justify-center text-2xl">{session.user?.name?.split(" ").map((n: string) => n?.[0]).slice(0, 2).join("") || "U"}</div>
             <div>
               <div className="text-lg font-bold">{session.user?.name}</div>
               <div className="text-sm text-gray-500">{session.user?.email}</div>

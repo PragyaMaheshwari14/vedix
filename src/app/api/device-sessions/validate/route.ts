@@ -4,29 +4,94 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/auth/auth";
 import { NextResponse } from "next/server";
 
+const N = 3;
+
 export async function POST(request: Request) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ valid: false }, { status: 401 });
+  try {
+    const session = await getServerSession(authOptions);
+    if (!session || !session.user) return NextResponse.json({ valid: false, error: "Unauthorized" }, { status: 401 });
 
-  // Safely derive a userId. Try session.user.id (if you added it in session callback),
-  // otherwise fall back to email.
-  const userId = ((session.user as any)?.id as string | undefined) ?? session.user?.email ?? "";
-  if (!userId) return NextResponse.json({ valid: false, reason: "no_user_id" }, { status: 400 });
+    const body = await request.json();
+    const deviceId = body?.deviceId;
+    if (!deviceId) return NextResponse.json({ valid: false, error: "deviceId required" }, { status: 400 });
 
-  const body = await request.json();
-  const deviceId = body.deviceId;
-  if (!deviceId) return NextResponse.json({ valid: false, reason: "no_device_id" }, { status: 400 });
+    const client = await clientPromise;
+    const db = client.db();
+    const DeviceSessions = db.collection("deviceSessions");
 
-  const client = await clientPromise;
-  const db = client.db();
-  const DeviceSessions = db.collection("deviceSessions");
+    const userId = (session.user as any).id ?? session.user?.email;
+    if (!userId) return NextResponse.json({ valid: false, error: "Missing user id" }, { status: 500 });
 
-  const rec = await DeviceSessions.findOne({ userId, deviceId });
-  if (!rec) return NextResponse.json({ valid: false, reason: "not_found" });
-  if (!rec.valid) return NextResponse.json({ valid: false, reason: "invalidated" });
+    // count active sessions
+    const activeCount = await DeviceSessions.countDocuments({ userId, valid: true });
 
-  // update lastSeen
-  await DeviceSessions.updateOne({ _id: rec._id }, { $set: { lastSeenAt: new Date() } });
+    // find existing session for this device
+    const rec = await DeviceSessions.findOne({ userId, deviceId });
 
-  return NextResponse.json({ valid: true });
+    // if existing and invalidated -> explicitly invalidated (force-logged-out)
+    if (rec && rec.valid === false) {
+      return NextResponse.json({ valid: false, reason: "invalidated" });
+    }
+
+    // if exists & valid -> update lastSeen and return success
+    if (rec && rec.valid) {
+      await DeviceSessions.updateOne({ _id: rec._id }, { $set: { lastSeenAt: new Date() } });
+
+      const sessions = await DeviceSessions.find({ userId }).sort({ createdAt: -1 }).toArray();
+      const activeSessions = sessions.map((s: any) => ({
+        _id: s._id.toString(),
+        deviceId: s.deviceId,
+        userAgent: s.userAgent,
+        createdAt: s.createdAt,
+        lastSeenAt: s.lastSeenAt,
+        valid: !!s.valid
+      }));
+
+      return NextResponse.json({ valid: true, activeCount, activeSessions });
+    }
+
+    // not found -> try to create if limit not reached
+    if (activeCount >= N) {
+      // limit reached -> return list so client can show choices
+      const sessions = await DeviceSessions.find({ userId, valid: true }).sort({ createdAt: -1 }).toArray();
+      const activeSessions = sessions.map((s: any) => ({
+        _id: s._id.toString(),
+        deviceId: s.deviceId,
+        userAgent: s.userAgent,
+        createdAt: s.createdAt,
+        lastSeenAt: s.lastSeenAt,
+        valid: !!s.valid
+      }));
+
+      return NextResponse.json({ valid: false, reason: "limit_reached", activeCount, activeSessions });
+    }
+
+    // create new session record
+    const ua = request.headers.get("user-agent") ?? "";
+    const newRec = {
+      userId,
+      deviceId,
+      sessionId: `${userId}-${Date.now()}`,
+      userAgent: ua,
+      createdAt: new Date(),
+      lastSeenAt: new Date(),
+      valid: true
+    };
+    const insertRes = await DeviceSessions.insertOne(newRec);
+    const activeCountAfter = await DeviceSessions.countDocuments({ userId, valid: true });
+    const sessions = await DeviceSessions.find({ userId }).sort({ createdAt: -1 }).toArray();
+    const activeSessions = sessions.map((s: any) => ({
+      _id: s._id.toString(),
+      deviceId: s.deviceId,
+      userAgent: s.userAgent,
+      createdAt: s.createdAt,
+      lastSeenAt: s.lastSeenAt,
+      valid: !!s.valid
+    }));
+
+    return NextResponse.json({ valid: true, createdId: insertRes.insertedId?.toString?.(), activeCount: activeCountAfter, activeSessions });
+  } catch (err: any) {
+    console.error("POST /api/device-sessions/validate error:", err);
+    return NextResponse.json({ valid: false, error: err?.message ?? "Server error" }, { status: 500 });
+  }
 }

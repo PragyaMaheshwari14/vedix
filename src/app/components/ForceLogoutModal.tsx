@@ -1,6 +1,6 @@
 "use client";
-
 import React, { useState } from "react";
+import { safeFetchJson } from "@/lib/safeFetch";
 
 type Device = {
   _id: string;
@@ -23,9 +23,24 @@ export default function ForceLogoutModal({
 }) {
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
+  const [info, setInfo] = useState<string | null>(null);
 
   function toggle(id: string) {
     setSelected((s) => ({ ...s, [id]: !s[id] }));
+  }
+
+  async function refreshList() {
+    setInfo("Refreshing…");
+    try {
+      const resp = await safeFetchJson("/api/device-sessions");
+      const list = resp.activeSessions ?? resp.sessions ?? [];
+      // dispatch a global event so parent can pick it up
+      window.dispatchEvent(new CustomEvent("deviceSessionsRefreshed", { detail: list }));
+    } catch (err: any) {
+      setInfo(String(err?.message ?? err));
+    } finally {
+      setTimeout(() => setInfo(null), 2000);
+    }
   }
 
   async function handleForce() {
@@ -40,14 +55,38 @@ export default function ForceLogoutModal({
     }
   }
 
+  async function handleForceAllOthers() {
+    if (!confirm("Force logout all other sessions for your account?")) return;
+    setBusy(true);
+    try {
+      const resp = await safeFetchJson("/api/device-sessions");
+      const sessionsList = resp.activeSessions ?? resp.sessions ?? [];
+      const myDeviceId = localStorage.getItem("deviceId");
+      const ids = sessionsList.filter((s: any) => s.deviceId !== myDeviceId).map((s: any) => s._id);
+      if (!ids.length) {
+        alert("No other sessions found to revoke.");
+        setBusy(false);
+        return;
+      }
+      await onForceLogout(ids);
+    } catch (err: any) {
+      alert(String(err?.message ?? err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-xl">
         <h3 className="text-lg font-semibold mb-2">Too many active devices</h3>
-        <p className="text-sm text-gray-600 mb-4">
-          You are already signed in on 3 devices. Choose older devices to force logout, or cancel.
-        </p>
+        <p className="text-sm text-gray-600 mb-4">You are already signed in on 3 devices. Choose older devices to force logout, or cancel.</p>
+
+        <div className="mb-3 flex gap-3">
+          <button onClick={refreshList} className="px-3 py-2 bg-gray-100 rounded">Refresh list</button>
+          <button onClick={handleForceAllOthers} className="px-3 py-2 bg-red-600 text-white rounded">Force logout all others</button>
+        </div>
 
         <div className="max-h-64 overflow-auto mb-4">
           {sessions.length === 0 ? (
@@ -58,9 +97,7 @@ export default function ForceLogoutModal({
                 <li key={s._id} className="p-3 rounded-lg bg-gray-50 flex items-start justify-between">
                   <div>
                     <div className="text-sm font-medium">{s.userAgent ?? s.deviceId}</div>
-                    <div className="text-xs text-gray-500">
-                      {s.lastSeenAt ? new Date(s.lastSeenAt).toLocaleString() : s.createdAt ? new Date(s.createdAt).toLocaleString() : "Unknown"}
-                    </div>
+                    <div className="text-xs text-gray-500">{s.lastSeenAt ? new Date(s.lastSeenAt).toLocaleString() : s.createdAt ? new Date(s.createdAt).toLocaleString() : "Unknown"}</div>
                   </div>
                   <label className="flex items-center gap-2 text-sm">
                     <input type="checkbox" checked={!!selected[s._id]} onChange={() => toggle(s._id)} />
@@ -72,15 +109,11 @@ export default function ForceLogoutModal({
           )}
         </div>
 
+        {info && <div className="text-sm text-gray-600 mb-2">{info}</div>}
+
         <div className="flex items-center justify-end gap-3">
           <button onClick={onClose} className="px-4 py-2 rounded-full bg-gray-100">Cancel login</button>
-          <button
-            onClick={handleForce}
-            disabled={busy}
-            className="px-4 py-2 rounded-full bg-red-600 text-white"
-          >
-            {busy ? "Working…" : "Force logout selected"}
-          </button>
+          <button onClick={handleForce} disabled={busy} className="px-4 py-2 rounded-full bg-red-600 text-white">{busy ? "Working…" : "Force logout selected"}</button>
         </div>
       </div>
     </div>
